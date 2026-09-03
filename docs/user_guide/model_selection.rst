@@ -55,6 +55,33 @@ Monte Carlo-style methods such as :class:`MultipleRandomizedCV`, the output is a
 :class:`~skfolio.portfolio.MultiPeriodPortfolio`. This is because each test produces a
 collection of multiple paths rather than a single path.
 
+The evaluation conventions are set through the function's `portfolio_params`.
+`weight_drift` is forwarded to every :class:`~skfolio.portfolio.Portfolio` of the
+path and takes precedence over the estimator's `portfolio_params` for that call. The
+other parameters, `compounded` included, configure the returned
+:class:`~skfolio.portfolio.MultiPeriodPortfolio`:
+
+.. code-block:: python
+
+    pred = cross_val_predict(
+        MeanRisk(transaction_costs=0.001 / 5),
+        X,
+        cv=WalkForward(test_size=5, train_size=252),
+        portfolio_params={"weight_drift": True, "compounded": True},
+    )
+
+With a sequential splitter, the `ending_weights` of each portfolio are passed as
+`previous_weights` to the next fit. They equal the target weights when
+`weight_drift=False` and the weights after the last observation when
+`weight_drift=True`, so transaction costs and `max_turnover` are then measured from the
+holdings a fund would trade from. A failed period keeps the last successful ending
+weights. The sequential path requires one portfolio per fold and raises for estimators
+that return a
+:class:`~skfolio.population.Population`. With non-sequential splitters such as
+`KFold`, drift is evaluated inside each test fold and is not propagated. See
+:ref:`evaluation_conventions` for the choice between `weight_drift=False` and
+`weight_drift=True`.
+
 **Example:**
 
 .. code-block:: python
@@ -63,7 +90,11 @@ collection of multiple paths rather than a single path.
     from sklearn.model_selection import KFold
 
     from skfolio.datasets import load_sp500_dataset
-    from skfolio.model_selection import WalkForward CombinatorialPurgedCV, cross_val_predict
+    from skfolio.model_selection import (
+        CombinatorialPurgedCV,
+        WalkForward,
+        cross_val_predict,
+    )
     from skfolio.optimization import MeanRisk
     from skfolio.preprocessing import prices_to_returns
 

@@ -51,6 +51,9 @@ class BaseOptimization(skb.BaseEstimator, ABC):
         If not provided and if available on the estimator, the following attributes are
         propagated to the portfolio by default: `name`, `transaction_costs`,
         `management_fees`, `previous_weights` and `risk_free_rate`.
+        For example, `portfolio_params={"weight_drift": True}` evaluates the predicted
+        portfolios with drifted weights instead of the target weights on every
+        observation.
 
     fallback : BaseOptimization | "previous_weights" | list[BaseOptimization | "previous_weights"], optional
         Fallback estimator or a list of estimators to try, in order, when the primary
@@ -428,11 +431,15 @@ class BaseOptimization(skb.BaseEstimator, ABC):
     def needs_previous_weights(self) -> bool:
         """Whether `previous_weights` must be propagated between folds/rebalances.
 
-        Used by `cross_val_predict` to decide whether to run sequentially and pass
-        the weights from the previous rebalancing to the next. This is `True` when
-        transaction costs, a maximum turnover, or a fallback depending on
-        `previous_weights` are present.
+        Used by `cross_val_predict` and `online_predict` to decide whether to run
+        sequentially and pass the weights from the previous rebalancing to the next.
+        This is `True` when `portfolio_params` sets `weight_drift`, or when transaction
+        costs, a maximum turnover, or a fallback depending on `previous_weights` are
+        present.
         """
+        if (getattr(self, "portfolio_params", None) or {}).get("weight_drift", False):
+            return True
+
         if _has_transaction_cost(getattr(self, _TRANSACTION_COSTS, None)):
             return True
 

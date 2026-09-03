@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pickle
+from itertools import pairwise
 
 import numpy as np
 import pytest
@@ -12,7 +13,7 @@ from sklearn import config_context
 from sklearn.model_selection import KFold
 from sklearn.pipeline import Pipeline
 
-from skfolio import MultiPeriodPortfolio, Population
+from skfolio import FailedPortfolio, MultiPeriodPortfolio, Population
 from skfolio.model_selection import (
     CombinatorialPurgedCV,
     MultipleRandomizedCV,
@@ -83,6 +84,48 @@ class PreviousWeightsAwareOptimization(BaseOptimization):
                 dtype=float,
             )
         return np.asarray(self.previous_weights, dtype=float)
+
+
+class FailingFixedOptimization(BaseOptimization):
+    """Fixed allocation that can fail for selected training-window lengths."""
+
+    def __init__(
+        self,
+        fail_on_n_observations: tuple[int, ...] = (),
+        portfolio_params: dict | None = None,
+        previous_weights=None,
+        raise_on_failure: bool = True,
+    ):
+        super().__init__(
+            portfolio_params=portfolio_params,
+            previous_weights=previous_weights,
+            raise_on_failure=raise_on_failure,
+        )
+        self.fail_on_n_observations = fail_on_n_observations
+
+    @property
+    def needs_previous_weights(self) -> bool:
+        return True
+
+    def fit(self, X, y=None):
+        if len(X) in self.fail_on_n_observations:
+            raise RuntimeError("forced failure")
+        self.n_features_in_ = X.shape[1]
+        weights = np.zeros(X.shape[1])
+        weights[:2] = [0.6, 0.4]
+        self.weights_ = weights
+        return self
+
+
+class PopulationOptimization(BaseOptimization):
+    """Optimization used to exercise the 2D-weights prediction path."""
+
+    def fit(self, X, y=None):
+        self.n_features_in_ = X.shape[1]
+        weights = np.zeros(X.shape[1])
+        weights[:2] = [0.6, 0.4]
+        self.weights_ = np.vstack((weights, weights[::-1]))
+        return self
 
 
 def test_validation(X):
@@ -424,4 +467,123 @@ def test_fallback_previous_weights_propagation(X):
         np.testing.assert_almost_equal(pred[i - 1].weights, pred[i].previous_weights)
         assert_weights_dict_subset_equal(
             pred[i - 1].weights_dict, pred[i].previous_weights_dict
+        )
+
+
+def test_weight_drift_function_routing_and_propagation(X):
+    model = InverseVolatility()
+    assert model.needs_previous_weights is False
+    cv = WalkForward(test_size=300, train_size=400)
+
+    pred = cross_val_predict(
+        model,
+        X,
+        cv=cv,
+        portfolio_params={"weight_drift": True, "compounded": True},
+    )
+
+    assert pred.compounded is True
+    assert model.portfolio_params is None
+    assert len(pred) >= 2
+    assert all(portfolio.weight_drift for portfolio in pred)
+    assert all(not portfolio.compounded for portfolio in pred)
+    for previous, current in pairwise(pred):
+        np.testing.assert_allclose(current.previous_weights, previous.ending_weights)
+
+
+def test_weight_drift_function_routing_through_pipeline(X):
+    model = Pipeline([("optimization", InverseVolatility())])
+    pred = cross_val_predict(
+        model,
+        X,
+        cv=WalkForward(test_size=300, train_size=400),
+        portfolio_params={"weight_drift": True},
+    )
+
+    assert model[-1].portfolio_params is None
+    assert all(portfolio.weight_drift for portfolio in pred)
+
+
+def test_weight_drift_function_value_overrides_estimator(X):
+    model = InverseVolatility(portfolio_params={"weight_drift": True})
+    pred = cross_val_predict(
+        model,
+        X,
+        cv=KFold(n_splits=3),
+        portfolio_params={"weight_drift": False},
+    )
+
+    assert model.portfolio_params == {"weight_drift": True}
+    assert all(not portfolio.weight_drift for portfolio in pred)
+
+
+def test_weight_drift_uses_executed_turnover_for_costs(X):
+    transaction_cost = 0.001
+    model = MeanRisk(
+        objective_function=ObjectiveFunction.MAXIMIZE_UTILITY,
+        transaction_costs=transaction_cost,
+    )
+    cv = WalkForward(test_size=300, train_size=400)
+    default = cross_val_predict(model, X, cv=cv)
+    drifted = cross_val_predict(
+        model, X, cv=cv, portfolio_params={"weight_drift": True}
+    )
+
+    for previous, current in pairwise(default):
+        np.testing.assert_allclose(current.previous_weights, previous.ending_weights)
+    for previous, current in pairwise(drifted):
+        np.testing.assert_allclose(current.previous_weights, previous.ending_weights)
+    np.testing.assert_allclose(
+        [portfolio.total_cost for portfolio in default],
+        transaction_cost * default.turnover,
+    )
+    np.testing.assert_allclose(
+        [portfolio.total_cost for portfolio in drifted],
+        transaction_cost * drifted.turnover,
+    )
+
+
+@pytest.mark.parametrize("weight_drift", [False, True])
+def test_failed_fold_keeps_last_successful_weights(X, weight_drift):
+    X_small = X.iloc[:20, :3]
+    model = FailingFixedOptimization(
+        fail_on_n_observations=(10,),
+        raise_on_failure=False,
+        portfolio_params={"weight_drift": weight_drift},
+    )
+    with pytest.warns(UserWarning, match="forced failure"):
+        pred = cross_val_predict(model, X_small, cv=sks.TimeSeriesSplit(n_splits=3))
+
+    assert isinstance(pred[1], FailedPortfolio)
+    np.testing.assert_allclose(pred[2].previous_weights, pred[0].ending_weights)
+
+
+def test_population_prediction_forwards_weight_drift(X):
+    model = PopulationOptimization(portfolio_params={"weight_drift": True}).fit(X)
+    population = model.predict(X.iloc[:5])
+
+    assert isinstance(population, Population)
+    assert all(portfolio.weight_drift for portfolio in population)
+
+
+def test_combinatorial_population_routes_weight_drift(X):
+    prediction = cross_val_predict(
+        InverseVolatility(),
+        X.iloc[:120, :3],
+        cv=CombinatorialPurgedCV(n_folds=4, n_test_folds=2),
+        portfolio_params={"weight_drift": True, "compounded": True},
+    )
+
+    assert isinstance(prediction, Population)
+    assert all(path.compounded for path in prediction)
+    assert all(portfolio.weight_drift for path in prediction for portfolio in path)
+
+
+def test_sequential_population_prediction_raises_clear_error(X):
+    with pytest.raises(ValueError, match="estimator returned a Population"):
+        cross_val_predict(
+            PopulationOptimization(),
+            X.iloc[:30],
+            cv=sks.TimeSeriesSplit(n_splits=3),
+            portfolio_params={"weight_drift": True},
         )

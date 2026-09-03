@@ -181,6 +181,17 @@ be solved and `raise_on_failure=False`, `online_predict` records that rebalance 
 estimator uses previous weights, the last valid allocation remains the reference for
 later rebalances.
 
+Pass `portfolio_params={"weight_drift": True, "compounded": True}` to
+`online_predict` to evaluate the path with drifted weights and compounded returns.
+`weight_drift` is forwarded to each :class:`~skfolio.portfolio.Portfolio` of the path
+and the other parameters configure the returned
+:class:`~skfolio.portfolio.MultiPeriodPortfolio`. With `weight_drift=True`, the
+`ending_weights` of the last successful portfolio are the weights after its final
+observation; with `weight_drift=False`, they equal its target weights. These ending
+weights become the `previous_weights` of the next rebalancing. The same rule applies to
+the `portfolio_params` of `online_score`, `OnlineGridSearch` and
+`OnlineRandomizedSearch` when they evaluate a portfolio optimizer.
+
 To hold the last allocation instead of producing a failed rebalance, configure
 `fallback="previous_weights"`. Other fallback estimators are not available with
 `partial_fit`, because they would not have learned from the same sequence of past

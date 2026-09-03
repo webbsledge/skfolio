@@ -49,5 +49,6 @@ Upgrading between major versions is covered in the :ref:`Migration Guide <migrat
     Metadata Routing <metadata_routing>
     Datasets <datasets>
     Data Preparation <data_preparation>
+    Evaluation Conventions <evaluation_conventions>
     Asset Data Representation <data_representation>
     Migration Guide <migration>

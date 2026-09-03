@@ -101,8 +101,9 @@ is to use the list `[PerfMeasure.MEAN, RiskMeasure.VARIANCE]`.
 
 Portfolio
 *********
-:class:`Portfolio` inherits from :class:`BasePortfolio`. The portfolio returns are the
-dot product of the assets weights with the assets returns minus costs:
+:class:`Portfolio` inherits from :class:`BasePortfolio`. Under the default
+constant-weight convention, portfolio returns are the dot product of the asset weights
+and asset returns minus costs:
 
     .. math::   r_p = R \cdot w^{T} - c^{T} \cdot | w - w_{prev} | - f^{T} \cdot w
 
@@ -111,26 +112,24 @@ returns, :math:`w` the vector of assets weights, :math:`c` the vector of assets
 transaction costs, :math:`f` the vector of assets management fees and :math:`w_{prev}`
 the assets previous weights.
 
-.. warning::
+By default, the target weights are held on every observation. This constant-weight
+convention is consistent with the convex optimization problems: it evaluates the target
+allocation the optimizer selected. It measures **allocation skill**, an
+expectation-based (ex-ante) evaluation whose return distribution does not depend on the
+order of the observations.
 
-    The :class:`Portfolio` formulation is **consistent** with the convex optimization
-    problems: portfolio returns are computed as a **dot product** of weights and asset
-    returns, minus costs. This formulation is **not perfectly replicable** due to weight
-    drift when asset prices move, except in the ideal case of periodic rebalancing with
-    zero transaction costs.
+With `weight_drift=True`, each position grows with its own asset return and the held
+weights drift away from the targets between the first and the last observation of `X`
+(buy-and-hold). The implicit cash position earns zero. Early winners take a larger
+weight and early losers a smaller one, so the return series depends on the order of the
+observations. Combined with `compounded=True`, it measures **realized capital growth**,
+a path-dependent (ex-post) evaluation along the historical return path.
 
-    This design choice is analogous to using **non-compounded vs compounded returns** to
-    compare trading strategies. `skfolio` focuses on **allocation skill**, which corresponds
-    to an **expectation-based (ex-ante) evaluation**, rather than on **realized capital
-    growth**, which corresponds to a **path-dependent (ex-post) evaluation** along a
-    single return path.
-
-    Weight drift introduces **path dependence**: early winners get larger weights, early
-    losers shrink, and outcomes depend on return ordering. Two portfolios with the same
-    expected returns and covariances can end with very different performance due only to
-    the sequence of returns, which contaminates the comparison. Likewise, a volatile asset
-    can dominate portfolio results because it moved early, not because it has a higher
-    expected return.
+Transaction costs and management fees are charged the same way whether `weight_drift`
+is `False` or `True`.
+`weight_drift` changes the return series, `compounded` changes how that series is
+summarized. See :ref:`evaluation_conventions` for the choice between
+`weight_drift=False` and `weight_drift=True`.
 
 **Example:**
 
@@ -150,6 +149,10 @@ the assets previous weights.
 
     print(portfolio.returns)
     >>> array([0.0014, 0.0002, 0.0025])
+
+    drifted_portfolio = Portfolio(X=X, weights=weights, weight_drift=True)
+    drifted_portfolio.weights_per_observation
+    drifted_portfolio.ending_weights
 
 
 `X` can be any data-container including numpy array and pandas DataFrame:
@@ -202,6 +205,11 @@ In addition, it also implements weights related methods:
     portfolio.get_weight("Asset A")
     >>> 0.6
 
+    # Held weights and trading diagnostics
+    portfolio.weights_per_observation
+    portfolio.ending_weights
+    portfolio.turnover
+
     # Plots
     portfolio.plot_contribution()
     portfolio.plot_composition()
@@ -214,6 +222,11 @@ Multi Period Portfolio
 list of :class:`Portfolio`. The multi-period portfolio returns are the sum of all its
 underlying :class:`Portfolio` returns.
 A `MultiPeriodPortfolio` is returned by :func:`~skfolio.model_selection.cross_val_predict`.
+Its `turnover` series holds the turnover of each `Portfolio`, and
+`ending_weights_dict` maps each `Portfolio` to its weights at the end of its observation
+window. With `weight_drift=False`, these are the target weights; with
+`weight_drift=True`, they are the held weights after the final observation's asset
+returns.
 
 For example, calling `cross_val_predict` with :class:`~skfolio.model_selection.WalkForward`
 will return a `MultiPeriodPortfolio` composed of multiple test `Portfolio`, each
@@ -224,4 +237,3 @@ corresponding to a train/test fold.
     from skfolio import MultiPeriodPortfolio
 
     portfolio = MultiPeriodPortfolio(portfolios=[ptf1, ptf2, ptf3])
-

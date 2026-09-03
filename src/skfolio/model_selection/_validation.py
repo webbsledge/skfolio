@@ -28,7 +28,7 @@ from skfolio.model_selection._combinatorial import BaseCombinatorialCV
 from skfolio.model_selection._multiple_randomized_cv import MultipleRandomizedCV
 from skfolio.model_selection._walk_forward import WalkForward
 from skfolio.population import Population
-from skfolio.portfolio import MultiPeriodPortfolio, Portfolio
+from skfolio.portfolio import FailedPortfolio, MultiPeriodPortfolio, Portfolio
 from skfolio.typing import ArrayLike, IntArray
 from skfolio.utils.tools import fit_and_predict, safe_split
 
@@ -134,8 +134,11 @@ def cross_val_predict(
     column_indices : ndarray, optional
         Indices of the `X` columns to cross-validate on.
 
-    portfolio_params :  dict, optional
-        Additional portfolio parameters passed to `MultiPeriodPortfolio`.
+    portfolio_params : dict, optional
+        Portfolio parameters passed to the returned `MultiPeriodPortfolio`, for example
+        `compounded`. `weight_drift` is a `Portfolio` parameter and is instead passed
+        to each `Portfolio` of the path, overriding the estimator's `portfolio_params`
+        for this call.
 
     entry_rebalancing_params : dict, optional
         Estimator parameters applied only while constructing the first portfolio of each
@@ -156,6 +159,15 @@ def cross_val_predict(
     -------
     predictions : MultiPeriodPortfolio | Population
         This is the result of calling `predict`
+
+    Notes
+    -----
+    With a sequential CV, each portfolio's `ending_weights` are passed as
+    `previous_weights` to the next fit. They equal the target `weights` when
+    `weight_drift=False` and the weights after the last observation when
+    `weight_drift=True`. A `FailedPortfolio` is skipped and the last valid weights are
+    kept. With a non-sequential CV, drift is applied inside each test fold and nothing
+    is propagated.
     """
     if not _is_portfolio_optimization_estimator(estimator):
         raise TypeError(
@@ -163,6 +175,8 @@ def cross_val_predict(
             "estimators. For non-portfolio optimization estimators, use "
             "`sklearn.model_selection.cross_val_predict`."
         )
+
+    estimator, portfolio_params = _route_weight_drift(estimator, portfolio_params)
 
     X, y = safe_split(X, y, indices=column_indices, axis=1)
     X, y = sku.indexable(X, y)
@@ -177,8 +191,6 @@ def cross_val_predict(
 
     cv = sks.check_cv(cv, y)
     splits = list(cv.split(X, y, **routed_params.splitter.split))
-
-    portfolio_params = {} if portfolio_params is None else portfolio_params.copy()
 
     # We ensure that the folds are not shuffled
     if not isinstance(cv, BaseCombinatorialCV | MultipleRandomizedCV):
@@ -244,9 +256,9 @@ def cross_val_predict(
                     "Parallel processing has been disabled because the optimization "
                     "method requires sequential processing of previous weights or "
                     "`entry_rebalancing_params`. To suppress this warning, set "
-                    "`n_jobs=None`, remove `entry_rebalancing_params`, or disable "
-                    "sequential processing of previous weights by setting your "
-                    "Optimization's `needs_previous_weights` attribute to False.",
+                    "`n_jobs=None`, remove `entry_rebalancing_params`, or disable the "
+                    "options that require previous weights, such as `weight_drift`, "
+                    "transaction costs, `max_turnover`, or a previous-weights fallback.",
                     stacklevel=2,
                 )
             predictions = _run_path(
@@ -467,6 +479,56 @@ def _get_last_step(estimator: skb.BaseEstimator | Pipeline) -> skb.BaseEstimator
     return estimator
 
 
+def _route_weight_drift(
+    estimator: skb.BaseEstimator | Pipeline,
+    portfolio_params: dict | None,
+    *,
+    clone_estimator: bool = True,
+) -> tuple[skb.BaseEstimator | Pipeline, dict]:
+    """Forward `weight_drift` from `portfolio_params` to the child portfolios.
+
+    `weight_drift` is a `Portfolio` parameter, so it is removed from the parameters of
+    the returned `MultiPeriodPortfolio` and written into the `portfolio_params` of the
+    last estimator step, where it takes precedence over the estimator's own value.
+
+    Parameters
+    ----------
+    estimator : BaseEstimator | Pipeline
+        Estimator or pipeline whose last step produces the child portfolios.
+
+    portfolio_params : dict, optional
+        Parameters passed to the prediction function for the returned
+        `MultiPeriodPortfolio`, possibly including `weight_drift`.
+
+    clone_estimator : bool, default=True
+        If True, the estimator is cloned before being modified. Online helpers pass
+        False because they operate on a clone whose fitted state must be kept.
+
+    Returns
+    -------
+    estimator : BaseEstimator | Pipeline
+        The estimator carrying `weight_drift`, or the input estimator when
+        `portfolio_params` does not contain it.
+
+    multi_period_params : dict
+        Parameters of the returned `MultiPeriodPortfolio`, without `weight_drift`.
+    """
+    multi_period_params = {} if portfolio_params is None else portfolio_params.copy()
+    if "weight_drift" not in multi_period_params:
+        return estimator, multi_period_params
+
+    weight_drift = multi_period_params.pop("weight_drift")
+    if clone_estimator:
+        estimator = sk.clone(estimator)
+    last_step = _get_last_step(estimator)
+    child_portfolio_params = (
+        {} if last_step.portfolio_params is None else last_step.portfolio_params.copy()
+    )
+    child_portfolio_params["weight_drift"] = weight_drift
+    last_step.set_params(portfolio_params=child_portfolio_params)
+    return estimator, multi_period_params
+
+
 def _is_portfolio_optimization_estimator(
     estimator: skb.BaseEstimator | Pipeline,
 ) -> bool:
@@ -552,9 +614,9 @@ def _run_path(
     """Run sequential fit/predict along a single path of ordered splits.
 
     Used when the final estimator requires previous portfolio weights between
-    consecutive folds (e.g. walk-forward validation). The function propagates
-    the `previous_weights` from the prediction of the previous fold to the
-    next one.
+    consecutive folds (e.g. walk-forward validation). The function passes each
+    portfolio's `ending_weights` as `previous_weights` to the next fit. A failed
+    prediction leaves the propagated weights unchanged.
 
     Parameters
     ----------
@@ -604,6 +666,12 @@ def _run_path(
             method=method,
             column_indices=column_indices[0] if column_indices else None,
         )
+        if isinstance(ptf, Population):
+            raise ValueError(
+                "Sequential propagation of `previous_weights` requires one "
+                "Portfolio per fold. The estimator returned a Population."
+            )
         predictions.append(ptf)
-        prev_weights = ptf.weights_dict if use_dict else ptf.weights
+        if not isinstance(ptf, FailedPortfolio):
+            prev_weights = ptf.ending_weights_dict if use_dict else ptf.ending_weights
     return predictions

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from itertools import pairwise
 
 import numpy as np
 import pytest
@@ -118,6 +119,20 @@ class PreviousWeightsAwareOptimization(BaseOptimization):
                 dtype=float,
             )
         return np.asarray(self.previous_weights, dtype=float)
+
+
+class PopulationOptimization(BaseOptimization):
+    """Online estimator used to exercise the 2D-weights prediction path."""
+
+    def fit(self, X, y=None):
+        return self.partial_fit(X, y)
+
+    def partial_fit(self, X, y=None):
+        self.n_features_in_ = X.shape[1]
+        weights = np.zeros(X.shape[1])
+        weights[:2] = [0.6, 0.4]
+        self.weights_ = np.vstack((weights, weights[::-1]))
+        return self
 
 
 def _make_inactive_block(
@@ -378,6 +393,68 @@ class TestOnlinePredict:
         assert isinstance(pred[1], FailedPortfolio)
         np.testing.assert_array_equal(pred[2].previous_weights, first_expected)
         np.testing.assert_array_equal(pred[2].weights, third_expected)
+
+    def test_weight_drift_function_routing_and_propagation(self, X):
+        model = _make_online_estimator()
+        pred = online_predict(
+            model,
+            X,
+            warmup_size=400,
+            test_size=300,
+            portfolio_params={"weight_drift": True, "compounded": True},
+        )
+
+        assert pred.compounded is True
+        assert model.portfolio_params is None
+        assert len(pred) >= 2
+        assert all(portfolio.weight_drift for portfolio in pred)
+        assert all(not portfolio.compounded for portfolio in pred)
+        for previous, current in pairwise(pred):
+            np.testing.assert_allclose(
+                current.previous_weights, previous.ending_weights
+            )
+
+    def test_weight_drift_function_value_overrides_estimator(self, X):
+        model = _make_online_estimator()
+        model.set_params(portfolio_params={"weight_drift": True})
+        pred = online_predict(
+            model,
+            X,
+            warmup_size=400,
+            test_size=300,
+            portfolio_params={"weight_drift": False},
+        )
+
+        assert model.portfolio_params == {"weight_drift": True}
+        assert all(not portfolio.weight_drift for portfolio in pred)
+
+    def test_failed_portfolio_keeps_last_drifted_weights(self, X):
+        pred = online_predict(
+            PreviousWeightsAwareOptimization(
+                fail_on_counts=(1,),
+                raise_on_failure=False,
+                scale=0.5,
+            ),
+            X,
+            warmup_size=400,
+            test_size=300,
+            reduce_test=True,
+            portfolio_params={"weight_drift": True},
+        )
+
+        assert isinstance(pred[1], FailedPortfolio)
+        assert not np.allclose(pred[0].weights, pred[0].ending_weights)
+        np.testing.assert_allclose(pred[2].previous_weights, pred[0].ending_weights)
+
+    def test_sequential_population_prediction_raises_clear_error(self, X):
+        with pytest.raises(ValueError, match="estimator returned a Population"):
+            online_predict(
+                PopulationOptimization(),
+                X,
+                warmup_size=400,
+                test_size=300,
+                portfolio_params={"weight_drift": True},
+            )
 
     def test_online_fallback_chain_persists_after_later_updates(self, X):
         """Fallback diagnostics stay attached to each online portfolio."""

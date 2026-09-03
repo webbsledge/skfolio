@@ -623,6 +623,36 @@ class MultiPeriodPortfolio(BasePortfolio):
         }
 
     @property
+    def ending_weights_dict(self) -> dict[str, dict[str, float]]:
+        """Map each Portfolio name to its asset weights carried into the next rebalance.
+
+        For each Portfolio, the nested dictionary contains its `ending_weights_dict`,
+        as determined by that Portfolio's `weight_drift` setting. Failed portfolios map
+        every asset to NaN.
+        """
+        names = deduplicate_names([ptf.name for ptf in self.portfolios])
+        return {
+            name: ptf.ending_weights_dict
+            for name, ptf in zip(names, self.portfolios, strict=True)
+        }
+
+    @property
+    def turnover(self) -> pd.Series:
+        """Turnover of each Portfolio, indexed by its first observation.
+
+        With `weight_drift=False`, each value is target turnover. With
+        `weight_drift=True`, each value is executed turnover because
+        `previous_weights` are the preceding Portfolio's drifted `ending_weights`.
+        Failed portfolios have a NaN value.
+        """
+        return pd.Series(
+            data=[portfolio.turnover for portfolio in self.portfolios],
+            index=[portfolio.observations[0] for portfolio in self.portfolios],
+            name="turnover",
+            dtype=float,
+        )
+
+    @property
     def weights_per_observation(self) -> pd.DataFrame:
         """DataFrame of the Portfolio weights per observation."""
         return (
@@ -1101,7 +1131,6 @@ def _prepare_multi_period_realized_attribution_inputs(
     if len(multi_period_portfolio) == 0:
         raise ValueError("Cannot compute attribution on an empty MultiPeriodPortfolio.")
 
-    n_factor_model_assets = len(factor_model.asset_names)
     observation_parts: list[np.ndarray] = []
     return_parts: list[np.ndarray] = []
     weight_parts: list[np.ndarray] = []
@@ -1109,13 +1138,17 @@ def _prepare_multi_period_realized_attribution_inputs(
     for portfolio in multi_period_portfolio:
         if isinstance(portfolio, FailedPortfolio):
             continue
+        if portfolio.weight_drift:
+            # Weights held during each observation, shape (n_observations, n_assets).
+            weights = portfolio._get_weights_path()
+        else:
+            weights = np.broadcast_to(
+                portfolio.weights, (portfolio.n_observations, portfolio.n_assets)
+            )
         aligned_weights = _align_weights(
-            portfolio.weights, portfolio.assets, factor_model.asset_names
+            weights, portfolio.assets, factor_model.asset_names
         )
-        n_observations = len(portfolio.observations)
-        weight_parts.append(
-            np.broadcast_to(aligned_weights, (n_observations, n_factor_model_assets))
-        )
+        weight_parts.append(aligned_weights)
         observation_parts.append(portfolio.observations)
         return_parts.append(portfolio.returns)
 

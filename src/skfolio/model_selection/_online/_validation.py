@@ -30,8 +30,10 @@ from skfolio.model_selection._validation import (
     _get_last_step,
     _is_portfolio_optimization_estimator,
     _route_params,
+    _route_weight_drift,
 )
 from skfolio.model_selection._walk_forward import WalkForward
+from skfolio.population import Population
 from skfolio.portfolio import FailedPortfolio, MultiPeriodPortfolio
 from skfolio.typing import ArrayLike, FloatArray
 from skfolio.utils.tools import fit_single_estimator
@@ -127,8 +129,11 @@ def online_predict(
         routing.
 
     portfolio_params : dict, optional
-        Additional parameters forwarded to the resulting
-        :class:`~skfolio.portfolio.MultiPeriodPortfolio`.
+        Portfolio parameters passed to the returned
+        :class:`~skfolio.portfolio.MultiPeriodPortfolio`, for example `compounded`.
+        `weight_drift` is a `Portfolio` parameter and is instead passed to each
+        `Portfolio` of the path, overriding the estimator's `portfolio_params` for this
+        call.
 
     entry_rebalancing_params : dict, optional
         Estimator parameters applied only while constructing the first portfolio. This is
@@ -159,6 +164,14 @@ def online_predict(
     --------
     :ref:`sphx_glr_auto_examples_online_learning_plot_3_online_portfolio_optimization_evaluation.py`
         Online evaluation of portfolio optimization using `online_predict`.
+
+    Notes
+    -----
+    When the estimator needs previous weights, each portfolio's `ending_weights` are
+    passed as `previous_weights` to the next update. They equal the target `weights`
+    when `weight_drift=False` and the weights after the last observation when
+    `weight_drift=True`. A `FailedPortfolio` is skipped and the last valid weights are
+    kept.
 
     Examples
     --------
@@ -312,9 +325,11 @@ def online_score(
         `ValueError` for portfolio optimization estimators.
 
     portfolio_params : dict, optional
-        Additional parameters forwarded to the resulting
-        :class:`~skfolio.portfolio.MultiPeriodPortfolio` when scoring a
-        portfolio optimization estimator.
+        Portfolio parameters passed to the
+        :class:`~skfolio.portfolio.MultiPeriodPortfolio` built when scoring a portfolio
+        optimization estimator, for example `compounded`. `weight_drift` is a
+        `Portfolio` parameter and is instead passed to each `Portfolio` of the path,
+        overriding the estimator's `portfolio_params` for this call.
 
     entry_rebalancing_params : dict, optional
         Estimator parameters applied only while constructing the first portfolio of a
@@ -605,7 +620,9 @@ def _online_predict(
     multi_period_portfolio : MultiPeriodPortfolio
         Predicted portfolios aggregated across test windows.
     """
-    portfolio_params = {} if portfolio_params is None else portfolio_params.copy()
+    estimator, portfolio_params = _route_weight_drift(
+        estimator, portfolio_params, clone_estimator=False
+    )
     last_step = _get_last_step(estimator)
     needs_prev_weights = getattr(last_step, "needs_previous_weights", False)
     use_dict = _asset_names_enabled(X)
@@ -631,6 +648,11 @@ def _online_predict(
             refit_last=refit_last,
         ):
             portfolio = estimator.predict(X[test_slice])
+            if needs_prev_weights and isinstance(portfolio, Population):
+                raise ValueError(
+                    "Sequential propagation of `previous_weights` requires one "
+                    "Portfolio per fold. The estimator returned a Population."
+                )
             portfolios.append(portfolio)
 
             if first_optimization:
@@ -640,9 +662,14 @@ def _online_predict(
                 first_optimization = False
 
             if needs_prev_weights and not isinstance(portfolio, FailedPortfolio):
-                prev_weights = portfolio.weights_dict if use_dict else portfolio.weights
                 # _online_walk_forward updates the estimator before yielding again.
-                last_step.set_params(previous_weights=prev_weights)
+                last_step.set_params(
+                    previous_weights=(
+                        portfolio.ending_weights_dict
+                        if use_dict
+                        else portfolio.ending_weights
+                    )
+                )
     finally:
         if previous_params is not None:
             last_step.set_params(**previous_params)

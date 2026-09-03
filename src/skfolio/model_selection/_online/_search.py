@@ -133,9 +133,11 @@ class BaseOnlineSearch(skb.MetaEstimatorMixin, skb.BaseEstimator, ABC):
         If set to `"raise"`, the error is raised.
 
     portfolio_params : dict, optional
-        Parameters forwarded to
-        :class:`~skfolio.portfolio.MultiPeriodPortfolio` when scoring
-        portfolio estimators.
+        Portfolio parameters passed to the
+        :class:`~skfolio.portfolio.MultiPeriodPortfolio` built when scoring a portfolio
+        optimization estimator, for example `compounded`. `weight_drift` is a
+        `Portfolio` parameter and is instead passed to each `Portfolio` of the path,
+        overriding the estimator's `portfolio_params` for this call.
 
     entry_rebalancing_params : dict, optional
         Estimator parameters applied only while constructing the first portfolio of
@@ -524,9 +526,11 @@ class OnlineGridSearch(BaseOnlineSearch):
         portfolio optimization estimators.
 
     portfolio_params : dict, optional
-        Parameters forwarded to
-        :class:`~skfolio.portfolio.MultiPeriodPortfolio` when scoring
-        portfolio estimators.
+        Portfolio parameters passed to the
+        :class:`~skfolio.portfolio.MultiPeriodPortfolio` built when scoring a portfolio
+        optimization estimator, for example `compounded`. `weight_drift` is a
+        `Portfolio` parameter and is instead passed to each `Portfolio` of the path,
+        overriding the estimator's `portfolio_params` for this call.
 
     entry_rebalancing_params : dict, optional
         Estimator parameters applied only while constructing the first portfolio of
@@ -781,9 +785,11 @@ class OnlineRandomizedSearch(BaseOnlineSearch):
         portfolio optimization estimators.
 
     portfolio_params : dict, optional
-        Parameters forwarded to
-        :class:`~skfolio.portfolio.MultiPeriodPortfolio` when scoring
-        portfolio estimators.
+        Portfolio parameters passed to the
+        :class:`~skfolio.portfolio.MultiPeriodPortfolio` built when scoring a portfolio
+        optimization estimator, for example `compounded`. `weight_drift` is a
+        `Portfolio` parameter and is instead passed to each `Portfolio` of the path,
+        overriding the estimator's `portfolio_params` for this call.
 
     entry_rebalancing_params : dict, optional
         Estimator parameters applied only while constructing the first portfolio of
