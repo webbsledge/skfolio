@@ -13,6 +13,7 @@ from sklearn.exceptions import UnsetMetadataPassedError
 from sklearn.pipeline import make_pipeline
 
 from skfolio import FailedPortfolio, MultiPeriodPortfolio
+from skfolio.measures import RatioMeasure
 from skfolio.metrics import (
     diagonal_calibration_ratio,
     mahalanobis_calibration_ratio,
@@ -408,11 +409,32 @@ class TestOnlinePredict:
         assert model.portfolio_params is None
         assert len(pred) >= 2
         assert all(portfolio.weight_drift for portfolio in pred)
-        assert all(not portfolio.compounded for portfolio in pred)
+        assert all(portfolio.compounded for portfolio in pred)
         for previous, current in pairwise(pred):
             np.testing.assert_allclose(
                 current.previous_weights, previous.ending_weights
             )
+
+    def test_measurement_params_inherit_from_estimator(self, X):
+        model = _make_online_estimator(
+            portfolio_params={"compounded": True, "annualization_factor": 12}
+        )
+
+        pred = online_predict(
+            model,
+            X,
+            warmup_size=400,
+            test_size=300,
+        )
+
+        assert pred.compounded is True
+        assert pred.annualization_factor == 12
+        assert all(portfolio.compounded for portfolio in pred)
+        assert all(portfolio.annualization_factor == 12 for portfolio in pred)
+        assert model.portfolio_params == {
+            "compounded": True,
+            "annualization_factor": 12,
+        }
 
     def test_weight_drift_function_value_overrides_estimator(self, X):
         model = _make_online_estimator()
@@ -654,6 +676,23 @@ class TestOnlinePredict:
 
 
 class TestOnlineScore:
+    def test_portfolio_score_inherits_measurement_params(self, X):
+        """Portfolio scoring uses the estimator's reporting parameters."""
+        model = _make_online_estimator(portfolio_params={"risk_free_rate": 0.001})
+
+        pred = online_predict(model, X, warmup_size=400, test_size=300)
+        score = online_score(
+            model,
+            X,
+            warmup_size=400,
+            test_size=300,
+            scoring=RatioMeasure.SHARPE_RATIO,
+        )
+
+        assert pred.risk_free_rate == 0.001
+        assert all(portfolio.risk_free_rate == 0.001 for portfolio in pred)
+        assert score == pred.sharpe_ratio
+
     def test_default_scoring_aggregate(self, X):
         """online_score returns an aggregate float by default."""
         est = EWCovariance(half_life=30)

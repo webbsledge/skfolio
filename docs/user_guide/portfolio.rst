@@ -125,8 +125,10 @@ weight and early losers a smaller one, so the return series depends on the order
 observations. Combined with `compounded=True`, it measures **realized capital growth**,
 a path-dependent (ex-post) evaluation along the historical return path.
 
-Transaction costs and management fees are charged the same way whether `weight_drift`
-is `False` or `True`.
+Both weight conventions use the same transaction-cost and management-fee formulas.
+In a sequential evaluation, drift can still change transaction costs at later
+rebalancing dates because one portfolio's `ending_weights` become the next portfolio's
+`previous_weights`. Management fees remain based on the target weights.
 `weight_drift` changes the return series, `compounded` changes how that series is
 summarized. See :ref:`evaluation_conventions` for the choice between
 `weight_drift=False` and `weight_drift=True`.
@@ -219,14 +221,15 @@ In addition, it also implements weights related methods:
 Multi Period Portfolio
 **********************
 :class:`MultiPeriodPortfolio` inherits from :class:`BasePortfolio` and is composed of a
-list of :class:`Portfolio`. The multi-period portfolio returns are the sum of all its
-underlying :class:`Portfolio` returns.
+list of :class:`Portfolio`. Its return series concatenates the return series of those
+portfolios in list order. Its performance and risk measures are computed from that
+concatenated series.
 A `MultiPeriodPortfolio` is returned by :func:`~skfolio.model_selection.cross_val_predict`.
 Its `turnover` series holds the turnover of each `Portfolio`, and
 `ending_weights_dict` maps each `Portfolio` to its weights at the end of its observation
-window. With `weight_drift=False`, these are the target weights; with
-`weight_drift=True`, they are the held weights after the final observation's asset
-returns.
+window. With `weight_drift=False`, these are the target weights. With
+`weight_drift=True`, they are the held weights after applying the final observation's
+asset returns.
 
 For example, calling `cross_val_predict` with :class:`~skfolio.model_selection.WalkForward`
 will return a `MultiPeriodPortfolio` composed of multiple test `Portfolio`, each

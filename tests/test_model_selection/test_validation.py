@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pickle
+import warnings
 from itertools import pairwise
 
 import numpy as np
@@ -14,6 +15,7 @@ from sklearn.model_selection import KFold
 from sklearn.pipeline import Pipeline
 
 from skfolio import FailedPortfolio, MultiPeriodPortfolio, Population
+from skfolio.measures import PerfMeasure, RiskMeasure
 from skfolio.model_selection import (
     CombinatorialPurgedCV,
     MultipleRandomizedCV,
@@ -486,13 +488,251 @@ def test_weight_drift_function_routing_and_propagation(X):
     assert model.portfolio_params is None
     assert len(pred) >= 2
     assert all(portfolio.weight_drift for portfolio in pred)
-    assert all(not portfolio.compounded for portfolio in pred)
+    assert all(portfolio.compounded for portfolio in pred)
     for previous, current in pairwise(pred):
         np.testing.assert_allclose(current.previous_weights, previous.ending_weights)
 
 
+def test_measurement_params_inherit_from_estimator(X):
+    measurement_params = {
+        "compounded": True,
+        "risk_free_rate": 0.001,
+        "annualization_factor": 12,
+        "fitness_measures": [PerfMeasure.ANNUALIZED_MEAN, RiskMeasure.CVAR],
+        "min_acceptable_return": -0.002,
+        "value_at_risk_beta": 0.91,
+        "entropic_risk_measure_theta": 2.0,
+        "entropic_risk_measure_beta": 0.92,
+        "cvar_beta": 0.93,
+        "evar_beta": 0.94,
+        "drawdown_at_risk_beta": 0.95,
+        "cdar_beta": 0.96,
+        "edar_beta": 0.97,
+    }
+    model = InverseVolatility(portfolio_params=measurement_params.copy())
+
+    pred = cross_val_predict(model, X.iloc[:60, :3], cv=KFold(n_splits=3))
+
+    for param, expected in measurement_params.items():
+        assert getattr(pred, param) == expected
+        assert all(getattr(portfolio, param) == expected for portfolio in pred)
+    assert model.portfolio_params == measurement_params
+
+
+def test_function_measurement_params_override_estimator_and_resolve_none(X):
+    model = InverseVolatility(
+        portfolio_params={
+            "compounded": False,
+            "risk_free_rate": 0.001,
+            "annualization_factor": 12,
+            "fitness_measures": [PerfMeasure.ANNUALIZED_MEAN],
+        }
+    )
+    portfolio_params = {
+        "compounded": True,
+        "risk_free_rate": 0.002,
+        "annualization_factor": None,
+        "fitness_measures": None,
+    }
+
+    pred = cross_val_predict(
+        model,
+        X.iloc[:60, :3],
+        cv=KFold(n_splits=3),
+        portfolio_params=portfolio_params,
+    )
+
+    assert pred.compounded is True
+    assert pred.risk_free_rate == 0.002
+    assert pred.annualization_factor == 252
+    assert pred.fitness_measures == [PerfMeasure.MEAN, RiskMeasure.VARIANCE]
+    for portfolio in pred:
+        assert portfolio.compounded is True
+        assert portfolio.risk_free_rate == 0.002
+        assert portfolio.annualization_factor == 252
+        assert portfolio.fitness_measures == [PerfMeasure.MEAN, RiskMeasure.VARIANCE]
+    assert portfolio_params == {
+        "compounded": True,
+        "risk_free_rate": 0.002,
+        "annualization_factor": None,
+        "fitness_measures": None,
+    }
+    assert model.portfolio_params == {
+        "compounded": False,
+        "risk_free_rate": 0.001,
+        "annualization_factor": 12,
+        "fitness_measures": [PerfMeasure.ANNUALIZED_MEAN],
+    }
+
+
+def test_aggregate_only_params_are_not_forwarded_to_children(X):
+    X_small = X.iloc[:60, :3]
+    sample_weight = np.full(len(X_small), 1 / len(X_small))
+
+    pred = cross_val_predict(
+        InverseVolatility(),
+        X_small,
+        cv=KFold(n_splits=3),
+        portfolio_params={
+            "name": "aggregate",
+            "tag": "evaluation",
+            "sample_weight": sample_weight,
+            "check_observations_order": True,
+        },
+    )
+
+    assert pred.name == "aggregate"
+    assert pred.tag == "evaluation"
+    assert pred.check_observations_order is True
+    np.testing.assert_array_equal(pred.sample_weight, sample_weight)
+    assert all(portfolio.name == "InverseVolatility" for portfolio in pred)
+    assert all(portfolio.tag is None for portfolio in pred)
+    assert all(portfolio.sample_weight is None for portfolio in pred)
+
+
+@pytest.mark.parametrize(
+    ("estimator_params", "evaluation_params", "expected"),
+    [
+        ({"annualized_factor": 365}, {"annualization_factor": 12}, 12),
+        ({"annualization_factor": 12}, {"annualized_factor": 365}, 365),
+    ],
+)
+def test_annualized_factor_alias_resolution(
+    X, estimator_params, evaluation_params, expected
+):
+    model = InverseVolatility(portfolio_params=estimator_params)
+
+    with pytest.warns(FutureWarning, match="annualized_factor"):
+        pred = cross_val_predict(
+            model,
+            X.iloc[:60, :3],
+            cv=KFold(n_splits=3),
+            portfolio_params=evaluation_params,
+        )
+
+    assert pred.annualization_factor == expected
+    assert all(portfolio.annualization_factor == expected for portfolio in pred)
+    assert model.portfolio_params == estimator_params
+
+
+@pytest.mark.parametrize(
+    ("estimator_params", "evaluation_params"),
+    [
+        (
+            None,
+            {"annualization_factor": 12, "annualized_factor": 365},
+        ),
+        (
+            {"annualization_factor": 12, "annualized_factor": 365},
+            None,
+        ),
+    ],
+)
+def test_annualized_factor_alias_conflict_is_preserved(
+    X, estimator_params, evaluation_params
+):
+    with pytest.raises(ValueError, match="pass only `annualization_factor`"):
+        cross_val_predict(
+            InverseVolatility(portfolio_params=estimator_params),
+            X.iloc[:60, :3],
+            cv=KFold(n_splits=3),
+            portfolio_params=evaluation_params,
+        )
+
+
+@pytest.mark.parametrize(
+    ("portfolio_params", "expected"),
+    [(None, 0.001), ({"risk_free_rate": 0.002}, 0.002)],
+)
+def test_risk_free_rate_estimator_precedence(X, portfolio_params, expected):
+    model = MeanRisk(
+        risk_free_rate=0.001,
+        portfolio_params=portfolio_params,
+    )
+
+    pred = cross_val_predict(model, X.iloc[:60, :3], cv=KFold(n_splits=2))
+
+    assert pred.risk_free_rate == expected
+    assert all(portfolio.risk_free_rate == expected for portfolio in pred)
+
+
+def test_measurement_params_resolve_when_all_folds_fail(X):
+    model = FailingFixedOptimization(
+        fail_on_n_observations=(5, 10, 15),
+        raise_on_failure=False,
+        portfolio_params={"compounded": True, "annualization_factor": 12},
+    )
+
+    with pytest.warns(UserWarning, match="forced failure"):
+        pred = cross_val_predict(
+            model,
+            X.iloc[:20, :3],
+            cv=sks.TimeSeriesSplit(n_splits=3),
+        )
+
+    assert all(isinstance(portfolio, FailedPortfolio) for portfolio in pred)
+    assert pred.compounded is True
+    assert pred.annualization_factor == 12
+    assert all(portfolio.compounded for portfolio in pred)
+    assert all(portfolio.annualization_factor == 12 for portfolio in pred)
+
+
+def test_measurement_params_do_not_trigger_sequential_path(X):
+    model = InverseVolatility(portfolio_params={"compounded": True})
+    assert model.needs_previous_weights is False
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pred = cross_val_predict(
+            model,
+            X,
+            cv=WalkForward(test_size=300, train_size=400),
+            n_jobs=2,
+            portfolio_params={"risk_free_rate": 0.001},
+        )
+
+    assert not any("sequential processing" in str(w.message) for w in caught)
+    assert pred.compounded is True
+    assert pred.risk_free_rate == 0.001
+    assert all(portfolio.risk_free_rate == 0.001 for portfolio in pred)
+
+
+def test_multiple_randomized_paths_receive_measurement_params(X):
+    cv = MultipleRandomizedCV(
+        walk_forward=WalkForward(test_size=300, train_size=400),
+        n_subsamples=3,
+        asset_subset_size=5,
+        window_size=1200,
+        random_state=0,
+    )
+    prediction = cross_val_predict(
+        InverseVolatility(portfolio_params={"annualization_factor": 12}),
+        X,
+        cv=cv,
+        portfolio_params={"compounded": True, "risk_free_rate": 0.001},
+    )
+
+    assert isinstance(prediction, Population)
+    assert len(prediction) == 3
+    for path in prediction:
+        assert path.compounded is True
+        assert path.risk_free_rate == 0.001
+        assert path.annualization_factor == 12
+        for portfolio in path:
+            assert portfolio.compounded is True
+            assert portfolio.risk_free_rate == 0.001
+            assert portfolio.annualization_factor == 12
+
+
 def test_weight_drift_function_routing_through_pipeline(X):
-    model = Pipeline([("optimization", InverseVolatility())])
+    model = Pipeline(
+        [
+            (
+                "optimization",
+                InverseVolatility(portfolio_params={"compounded": True}),
+            )
+        ]
+    )
     pred = cross_val_predict(
         model,
         X,
@@ -500,7 +740,9 @@ def test_weight_drift_function_routing_through_pipeline(X):
         portfolio_params={"weight_drift": True},
     )
 
-    assert model[-1].portfolio_params is None
+    assert model[-1].portfolio_params == {"compounded": True}
+    assert pred.compounded is True
+    assert all(portfolio.compounded for portfolio in pred)
     assert all(portfolio.weight_drift for portfolio in pred)
 
 
@@ -576,6 +818,7 @@ def test_combinatorial_population_routes_weight_drift(X):
 
     assert isinstance(prediction, Population)
     assert all(path.compounded for path in prediction)
+    assert all(portfolio.compounded for path in prediction for portfolio in path)
     assert all(portfolio.weight_drift for path in prediction for portfolio in path)
 
 

@@ -571,13 +571,18 @@ Usage
 :class:`~skfolio.portfolio.MultiPeriodPortfolio`, each object summarizing its own
 return series. Both default to False.
 
-For a direct `model.predict(X)`, set `weight_drift` in the estimator's
-`portfolio_params`. For :func:`~skfolio.model_selection.cross_val_predict` and
-:func:`~skfolio.model_selection.online_predict`, set both conventions in the
-function's `portfolio_params`: `weight_drift` is forwarded to every portfolio of the
-path and the other parameters, `compounded` included, configure the returned
-:class:`~skfolio.portfolio.MultiPeriodPortfolio`. A `weight_drift` given to the
-function takes precedence over the estimator's value for that call.
+For a direct call to a portfolio optimizer's `predict` method, set both conventions in
+the optimizer's `portfolio_params`. For
+:func:`~skfolio.model_selection.cross_val_predict` and
+:func:`~skfolio.model_selection.online_predict`, they can instead be passed in the
+function's `portfolio_params` for an evaluation-specific override. `weight_drift` is
+applied to every `Portfolio` because it changes its return series. `compounded` is
+applied to each resulting `MultiPeriodPortfolio` and every `Portfolio` it contains.
+When omitted from the function call, either setting is inherited from the optimizer's
+`portfolio_params`. For example, `MeanRisk(portfolio_params={"compounded": True})`
+produces a compounded `MultiPeriodPortfolio` from `cross_val_predict` without repeating
+the setting. See :ref:`cross_validation` for the complete parameter precedence and
+routing rules.
 
 .. code-block:: python
 
@@ -601,7 +606,7 @@ each portfolio's `ending_weights` as `previous_weights` to the next fit. They eq
 targets :math:`w_k` by default and the drifted holdings :math:`\tilde{w}_k` when
 `weight_drift=True`. Consequently, `transaction_costs` and `max_turnover` operate on
 target turnover by default and executed turnover under drift. `weight_drift` alone is
-enough to run the path sequentially. `compounded` can be changed after construction;
+enough to run the path sequentially. `compounded` can be changed after construction.
 `weight_drift` is fixed at construction because it changes the return series itself.
 
 A failed period contributes no returns and no holdings. The last successful
@@ -626,9 +631,9 @@ holdings from a default run:
     drifted_mean = pred_drift.annualized_mean
     convention_effect = drifted_mean - pred_default.annualized_mean
 
-When the optimizer does not depend on `previous_weights` -- no `transaction_costs`,
-no `max_turnover`, and no fallback depending on previous weights -- both runs produce
-the same target sequence. Their difference in means therefore isolates the convention
+When the optimizer does not depend on `previous_weights` (no `transaction_costs`, no
+`max_turnover` and no fallback on previous weights), both runs produce the same target
+sequence. Their difference in means therefore isolates the convention
 effect for fixed targets. When the optimizer does depend on `previous_weights`, each
 run feeds its own `ending_weights` into later optimizations, so the difference compares
 two adaptive policies rather than isolating the return convention.

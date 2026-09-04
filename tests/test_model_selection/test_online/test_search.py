@@ -424,17 +424,23 @@ class TestOnlineGridSearch:
             warmup_size=WARMUP,
             test_size=TEST_SIZE,
             return_predictions=True,
-            portfolio_params={"weight_drift": True, "compounded": True},
+            portfolio_params={
+                "weight_drift": True,
+                "compounded": True,
+                "risk_free_rate": 0.001,
+            },
         )
         search.fit(X)
 
         assert model.portfolio_params is None
         assert hasattr(search.best_estimator_, "weights_")
-        assert search.best_estimator_.portfolio_params["weight_drift"] is True
+        assert search.best_estimator_.portfolio_params == {"weight_drift": True}
         [prediction] = search.cv_results_["predictions"]
         assert prediction.compounded is True
+        assert prediction.risk_free_rate == 0.001
         assert all(portfolio.weight_drift for portfolio in prediction)
-        assert all(not portfolio.compounded for portfolio in prediction)
+        assert all(portfolio.compounded for portfolio in prediction)
+        assert all(portfolio.risk_free_rate == 0.001 for portfolio in prediction)
 
     @pytest.mark.filterwarnings("ignore:Estimator fit failed:UserWarning")
     def test_return_predictions_aligns_failed_candidates(self, X):

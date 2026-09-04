@@ -57,7 +57,7 @@ class Portfolio(BasePortfolio):
 
     `weight_drift` changes the return series, `compounded` changes how that series is
     summarized. See :ref:`evaluation_conventions` for the choice between
-    constant-weight (`weight_drift=False`) and drifting-weight (`weight_drift=True`)
+    constant-weight (`weight_drift=False`) and drifted-weight (`weight_drift=True`)
     evaluation.
 
     Parameters
@@ -183,9 +183,9 @@ class Portfolio(BasePortfolio):
         `weights` on the first observation of `X`. The portfolio returns are those of
         the drifted weights. Drift accumulates over the whole window of
         `X`, and the implicit cash position :math:`1 - \sum_i w_i` earns zero.
-        Transaction costs and management fees are charged the same way whether
-        `weight_drift` is `False` or `True`. The default (`False`) is to hold the target
-        `weights` on every observation. This attribute is read-only. See
+        The same transaction-cost and management-fee formulas are used with either
+        setting. The default (`False`) is to hold the target `weights` on every
+        observation. This attribute is read-only. See
         :ref:`evaluation_conventions`.
 
     sample_weight : ndarray of shape (n_observations,), optional
@@ -458,13 +458,12 @@ class Portfolio(BasePortfolio):
         Difference.
 
     ending_weights : ndarray of shape (n_assets,)
-        Asset weights carried forward after the last observation of `X`. With
-        `weight_drift=False`, the constant-weight evaluation carries forward the target
-        `weights`. With `weight_drift=True`, the weight-drift evaluation carries
-        forward the held weights after applying the final observation's asset returns.
-        Sequential evaluation passes the `ending_weights` of a successful Portfolio as
-        `previous_weights` to the next fit. A `FailedPortfolio` contains only NaN ending
-        weights.
+        Asset weights at the end of the observation window. With `weight_drift=False`,
+        they equal the target `weights`. With `weight_drift=True`, they are the held
+        weights after applying the final observation's asset returns. A sequential
+        evaluation uses the `ending_weights` of a successful `Portfolio` as
+        `previous_weights` for the next optimization. A `FailedPortfolio` contains only
+        NaN ending weights.
 
     turnover : float
         L1 norm of `weights - previous_weights`.
@@ -617,7 +616,7 @@ class Portfolio(BasePortfolio):
         else:
             total_fee = (management_fees * weights).sum()
 
-        ending_weights = weights
+        ending_weights = weights.copy()
         if weights_provided:
             rets_clean = _nan_to_zero(rets)
             if weight_drift and n_observations > 0:
@@ -824,7 +823,7 @@ class Portfolio(BasePortfolio):
 
     @property
     def ending_weights_dict(self) -> dict[str, float]:
-        """Map each asset name to its `ending_weights` value, including zero weights."""
+        """Dict mapping asset name to ending weight; includes zeros."""
         return {
             asset: float(weight)
             for asset, weight in zip(self.assets, self.ending_weights, strict=True)
@@ -834,10 +833,11 @@ class Portfolio(BasePortfolio):
     def turnover(self) -> float:
         """L1 norm of `weights - previous_weights`.
 
-        With `weight_drift=False`, this is target turnover. With `weight_drift=True`,
-        this is executed turnover because sequential evaluation passes the preceding
-        Portfolio's drifted `ending_weights` as `previous_weights`. When
-        `previous_weights` is None, it defaults to zero.
+        In a sequential evaluation, `previous_weights` come from the last successful
+        Portfolio. With `weight_drift=False`, they are its target weights, so this is
+        target turnover. With `weight_drift=True`, they include the intervening drift,
+        so this is executed turnover. When `previous_weights` is None, it defaults to
+        zero.
         """
         if self._is_failed_portfolio:
             return np.nan

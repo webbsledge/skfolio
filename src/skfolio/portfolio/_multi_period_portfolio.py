@@ -624,11 +624,12 @@ class MultiPeriodPortfolio(BasePortfolio):
 
     @property
     def ending_weights_dict(self) -> dict[str, dict[str, float]]:
-        """Map each Portfolio name to its asset weights carried into the next rebalance.
+        """Map each Portfolio name to its weights at the end of its observation window.
 
         For each Portfolio, the nested dictionary contains its `ending_weights_dict`,
         as determined by that Portfolio's `weight_drift` setting. Failed portfolios map
-        every asset to NaN.
+        every asset to NaN. In a sequential evaluation, the next optimization uses the
+        last successful ending weights as `previous_weights`.
         """
         names = deduplicate_names([ptf.name for ptf in self.portfolios])
         return {
@@ -640,10 +641,11 @@ class MultiPeriodPortfolio(BasePortfolio):
     def turnover(self) -> pd.Series:
         """Turnover of each Portfolio, indexed by its first observation.
 
-        With `weight_drift=False`, each value is target turnover. With
-        `weight_drift=True`, each value is executed turnover because
-        `previous_weights` are the preceding Portfolio's drifted `ending_weights`.
-        Failed portfolios have a NaN value.
+        In a sequentially evaluated path, `previous_weights` come from the last
+        successful Portfolio. With `weight_drift=False`, they are its target weights,
+        so each value measures target turnover. With `weight_drift=True`, they include
+        the intervening drift, so each value measures executed turnover. Failed
+        portfolios have a NaN value.
         """
         return pd.Series(
             data=[portfolio.turnover for portfolio in self.portfolios],
