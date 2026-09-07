@@ -638,9 +638,44 @@ def _get_liquidation_turnover_and_cost(
     """Return turnover and cost assuming full liquidation of excluded positions.
 
     Positions outside the current asset set or investable subset have a target
-    weight of zero. Named previous holdings retain positions removed by a selector.
-    Array inputs can identify excluded positions when a full-universe investable
-    mask is available. Asset-specific cost arrays must cover those positions too.
+    weight of zero.
+
+    Parameters
+    ----------
+    previous_weights : float | dict[str, float] | array-like | None
+        Previous portfolio weights. A dictionary can include assets absent from
+        `assets_names`. Scalar and array inputs require `investable_mask` to
+        identify excluded positions. Arrays must cover the full universe to
+        contribute liquidation turnover. `None` means no previous holdings.
+
+    transaction_costs : float | dict[str, float] | array-like | None
+        Transaction cost rates. A scalar applies to all assets. Missing dictionary
+        entries default to zero. An array must align with `assets_names` and cover
+        all liquidated assets. `None` means no transaction costs.
+
+    assets_names : ndarray of shape (n_assets,), optional
+        Asset names before applying `investable_mask`. If `None`, column positions
+        are used when a mask is provided. Without names or a mask, the function
+        returns zero turnover and cost.
+
+    investable_mask : ndarray of shape (n_assets,), optional
+        Boolean mask selecting investable assets. Positions with a `False` entry
+        have a target weight of zero. If `None`, all assets in `assets_names` are
+        treated as investable.
+
+    Returns
+    -------
+    turnover : float
+        Sum of the absolute previous weights of excluded positions.
+
+    cost : float
+        Sum of those absolute weights multiplied by their transaction cost rates.
+
+    Raises
+    ------
+    ValueError
+        If an excluded position's weight is NaN or a transaction cost array cannot
+        provide rates for all liquidated assets.
     """
     if assets_names is None:
         if investable_mask is None:
