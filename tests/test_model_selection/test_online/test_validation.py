@@ -1058,3 +1058,41 @@ class TestOnlineScoringValidation:
 
         with pytest.raises(TypeError, match="response_method=None"):
             online_score(est, X, warmup_size=400, test_size=50, scoring=scorer)
+
+
+@pytest.mark.parametrize("as_array", [False, True])
+def test_online_target_turnover_without_costs(X, as_array):
+    X = X.iloc[:700, :2]
+    if as_array:
+        X = X.to_numpy()
+    model = _make_online_estimator(min_weights=0.5, max_weights=0.5)
+    pred = online_predict(model, X, warmup_size=400, test_size=100)
+    np.testing.assert_allclose(pred.turnover, [1.0, 0.0, 0.0], atol=1e-7)
+    for previous, current in pairwise(pred):
+        np.testing.assert_allclose(current.previous_weights, previous.ending_weights)
+    assert model.previous_weights is None
+
+
+@pytest.mark.parametrize("weight_drift", [False, True])
+def test_online_empty_prediction_keeps_previous_holdings(X, monkeypatch, weight_drift):
+    def predict_with_empty_period(self, X):
+        if self._partial_fit_count_ == 2:
+            X = X[:0]
+        return BaseOptimization.predict(self, X=X)
+
+    monkeypatch.setattr(
+        PreviousWeightsAwareOptimization, "predict", predict_with_empty_period
+    )
+    model = PreviousWeightsAwareOptimization(
+        scale=0.1, portfolio_params={"weight_drift": weight_drift}
+    )
+    pred = online_predict(
+        estimator=model, X=X.iloc[:16, :2], warmup_size=4, test_size=4
+    )
+    assert len(pred) == 3
+    assert pred[1].n_observations == 0
+    assert len(pred.turnover) == 2
+    np.testing.assert_allclose(pred[2].previous_weights, pred[0].ending_weights)
+    np.testing.assert_allclose(
+        pred[2].weights, pred[0].ending_weights + np.array([0.1, 0.0])
+    )

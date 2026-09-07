@@ -44,11 +44,11 @@ Upgrading between major versions is covered in the :ref:`Migration Guide <migrat
     Pre-Selection <pre_selection>
     Cross-Sectional Transformers <cross_sectional_transformers>
     Model Selection <model_selection>
+    Backtesting and Evaluation <backtesting_and_evaluation>
     Hyper-Parameters Tuning <hyper_parameters_tuning>
     Online Learning <online_learning>
     Metadata Routing <metadata_routing>
     Datasets <datasets>
     Data Preparation <data_preparation>
-    Evaluation Conventions <evaluation_conventions>
     Asset Data Representation <data_representation>
     Migration Guide <migration>

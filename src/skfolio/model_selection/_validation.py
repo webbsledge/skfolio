@@ -186,11 +186,13 @@ def cross_val_predict(
     Notes
     -----
     With a sequential CV, each portfolio's `ending_weights` are passed as
-    `previous_weights` to the next fit. They equal the target `weights` when
-    `weight_drift=False` and the weights after the last observation when
-    `weight_drift=True`. A `FailedPortfolio` is skipped and the last valid weights are
-    kept. With a non-sequential CV, drift is applied inside each test fold and nothing
-    is propagated.
+    `previous_weights` to the next fit when the estimator needs them. Otherwise,
+    fits remain independent and previous weights are assigned to the predicted
+    portfolios afterward for turnover and cost calculations. Ending weights equal
+    the target `weights` when `weight_drift=False` and the weights after the last
+    observation when `weight_drift=True`. Failed and empty portfolios are skipped
+    when propagating holdings. With a non-sequential CV, drift is applied inside
+    each test fold and nothing is propagated.
     """
     if not _is_portfolio_optimization_estimator(estimator):
         raise TypeError(
@@ -356,6 +358,10 @@ def cross_val_predict(
             **portfolio_params,
         )
 
+    if is_sequential_cv and not use_sequential_path:
+        for path in pred if isinstance(pred, Population) else [pred]:
+            path.portfolios = _propagate_previous_weights(portfolios=path.portfolios)
+
     _sync_measure_params_to_portfolios(pred, explicit_measure_param_names)
     return pred
 
@@ -473,14 +479,44 @@ def _route_params(
     return routed_params
 
 
-def _asset_names_enabled(X: ArrayLike) -> bool:
-    """Return whether X is a DataFrame and its column names are transferred inside
-    a Pipeline.
+def _has_asset_names(X: ArrayLike) -> bool:
+    """Return whether the optimizer's actual input carries string asset names."""
+    return hasattr(X, "columns") and all(isinstance(name, str) for name in X.columns)
+
+
+def _propagate_previous_weights(portfolios: list[Portfolio]) -> list[Portfolio]:
+    """Set previous weights along a path after independent fits.
+
+    The first portfolio retains the supplied initial holdings. Later portfolios
+    are reconstructed only when their previous holdings differ from the last
+    successful period's ending weights. Failed and empty periods do not advance
+    the holdings.
     """
-    return hasattr(X, "columns") and sk.get_config().get("transform_output") in [
-        "pandas",
-        "polars",
-    ]
+    result = []
+    previous_weights = None
+    for portfolio in portfolios:
+        if not isinstance(portfolio, FailedPortfolio) and portfolio.n_observations:
+            if previous_weights is not None:
+                params = portfolio._get_init_params()
+                current = params["previous_weights"]
+                if isinstance(current, dict) or isinstance(previous_weights, dict):
+                    same_weights = (
+                        isinstance(current, dict)
+                        and isinstance(previous_weights, dict)
+                        and current == previous_weights
+                    )
+                else:
+                    same_weights = np.array_equal(current, previous_weights)
+                if not same_weights:
+                    params["previous_weights"] = previous_weights
+                    portfolio = type(portfolio)(**params)
+            previous_weights = (
+                portfolio.ending_weights_dict
+                if _has_asset_names(X=portfolio.X)
+                else portfolio.ending_weights
+            )
+        result.append(portfolio)
+    return result
 
 
 def _get_last_step(estimator: skb.BaseEstimator | Pipeline) -> skb.BaseEstimator:
@@ -736,7 +772,6 @@ def _run_path(
     list[Portfolio]
         Portfolios predicted for each test fold in the path, in order.
     """
-    use_dict = _asset_names_enabled(X)
     predictions = []
     prev_weights = _get_last_step(estimator).previous_weights
     for i, (train, test, *column_indices) in enumerate(path_splits):
@@ -761,6 +796,10 @@ def _run_path(
                 "Portfolio per fold. The estimator returned a Population."
             )
         predictions.append(ptf)
-        if not isinstance(ptf, FailedPortfolio):
-            prev_weights = ptf.ending_weights_dict if use_dict else ptf.ending_weights
+        if not isinstance(ptf, FailedPortfolio) and ptf.n_observations:
+            prev_weights = (
+                ptf.ending_weights_dict
+                if _has_asset_names(X=ptf.X)
+                else ptf.ending_weights
+            )
     return predictions

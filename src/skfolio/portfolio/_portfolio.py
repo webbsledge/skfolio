@@ -25,6 +25,7 @@ from skfolio.measures import RiskMeasure, effective_number_assets
 from skfolio.portfolio._base import _ZERO_THRESHOLD, BasePortfolio
 from skfolio.typing import ArrayLike, FloatArray, IntArray, StrArray
 from skfolio.utils.tools import (
+    _get_liquidation_turnover_and_cost,
     args_names,
     cached_property_slots,
     default_asset_names,
@@ -56,7 +57,7 @@ class Portfolio(BasePortfolio):
     growth**: a path-dependent (ex-post) evaluation along the historical return path.
 
     `weight_drift` changes the return series, `compounded` changes how that series is
-    summarized. See :ref:`evaluation_conventions` for the choice between
+    summarized. See :ref:`backtesting_and_evaluation` for the choice between
     constant-weight (`weight_drift=False`) and drifted-weight (`weight_drift=True`)
     evaluation.
 
@@ -136,8 +137,10 @@ class Portfolio(BasePortfolio):
 
     previous_weights : float | dict[str, float] | array-like of shape (n_assets, ), optional
         Previous portfolio weights.
-        Previous weights are used to compute the total portfolio cost.
-        If `transaction_costs` is 0, `previous_weights` will have no impact.
+        Previous weights are used to compute turnover and transaction costs.
+        For named positions in assets absent from `X`, these calculations assume
+        full liquidation. To specify their transaction costs, `transaction_costs`
+        must be a single rate applied to all assets or a dictionary keyed by asset name.
         If a float is provided, it is applied to each asset.
         If a dictionary is provided, its (key/value) pair must be the
         (asset name/asset previous weight) and `X` must be a DataFrame with assets names
@@ -186,7 +189,7 @@ class Portfolio(BasePortfolio):
         The same transaction-cost and management-fee formulas are used with either
         setting. The default (`False`) is to hold the target `weights` on every
         observation. This attribute is read-only. See
-        :ref:`evaluation_conventions`.
+        :ref:`backtesting_and_evaluation`.
 
     sample_weight : ndarray of shape (n_observations,), optional
         Sample weights for each observation. If None, equal weights are assumed.
@@ -466,7 +469,8 @@ class Portfolio(BasePortfolio):
         NaN ending weights.
 
     turnover : float
-        L1 norm of `weights - previous_weights`.
+        Total absolute weight change, assuming full liquidation of positions in
+        assets absent from `X`.
     """
 
     _read_only_attrs: ClassVar[set] = BasePortfolio._read_only_attrs.copy()
@@ -502,6 +506,9 @@ class Portfolio(BasePortfolio):
         # custom getter (read-only and cached)
         "_nonzero_assets",
         "_nonzero_assets_index",
+        # private state
+        "_original_named_inputs",
+        "_liquidation_turnover",
         # private cache
         "_weights_path",
         # read-write
@@ -550,9 +557,23 @@ class Portfolio(BasePortfolio):
         n_observations, n_assets = rets.shape
 
         weights_provided = weights is not None
+        # Preserve excluded assets and their cost rates when reconstructing a portfolio.
+        original_named_inputs = {}
+        if isinstance(previous_weights, dict):
+            original_named_inputs[_PREVIOUS_WEIGHTS] = previous_weights.copy()
+        if isinstance(transaction_costs, dict):
+            original_named_inputs[_TRANSACTION_COSTS] = transaction_costs.copy()
+
+        liquidation_turnover = 0.0
+        liquidation_cost = 0.0
         if not weights_provided:
             weights = np.full(n_assets, np.nan)
         else:
+            liquidation_turnover, liquidation_cost = _get_liquidation_turnover_and_cost(
+                previous_weights=previous_weights,
+                transaction_costs=transaction_costs,
+                assets_names=assets,
+            )
             weights = input_to_array(
                 items=weights,
                 n_assets=n_assets,
@@ -599,7 +620,7 @@ class Portfolio(BasePortfolio):
             )
 
         # Default observations and assets if X is not a DataFrame
-        if observations is None or len(observations) == 0:
+        if observations is None:
             observations = np.arange(n_observations)
 
         if assets is None or len(assets) == 0:
@@ -610,6 +631,7 @@ class Portfolio(BasePortfolio):
             total_cost = 0
         else:
             total_cost = (transaction_costs * abs(previous_weights - weights)).sum()
+        total_cost += liquidation_cost
 
         if np.isscalar(management_fees) and management_fees == 0:
             total_fee = 0
@@ -655,6 +677,8 @@ class Portfolio(BasePortfolio):
             **kwargs,
         )
         self._loaded = False
+        self._original_named_inputs = original_named_inputs
+        self._liquidation_turnover = liquidation_turnover
         # We save the original array-like object and not the numpy copy for improved
         # memory
         self.X = X
@@ -677,24 +701,52 @@ class Portfolio(BasePortfolio):
     def _is_failed_portfolio(self) -> bool:
         return self.__class__.__name__ == "FailedPortfolio"
 
+    def _get_init_params(self) -> dict:
+        params = super()._get_init_params()
+        params.update(self._original_named_inputs)
+        return params
+
+    def _check_compatible_parameters(self, other: Portfolio) -> None:
+        """Check that portfolios differ only in weights, name or tag."""
+        assets = set(self.assets)
+        for name in args_names(self.__init__):
+            if name in ("weights", "name", "tag"):
+                continue
+            if not np.array_equal(getattr(self, name), getattr(other, name)):
+                raise ValueError(
+                    f"Cannot combine two Portfolios with different `{name}`"
+                )
+        # Aligned arrays do not include positions and rates outside X.
+        for name in (_PREVIOUS_WEIGHTS, _TRANSACTION_COSTS):
+            named = self._original_named_inputs.get(name, {})
+            other_named = other._original_named_inputs.get(name, {})
+            excluded_assets = (named.keys() | other_named.keys()) - assets
+            if any(
+                named.get(asset, 0) != other_named.get(asset, 0)
+                for asset in excluded_assets
+            ):
+                raise ValueError(
+                    f"Cannot combine two Portfolios with different `{name}`"
+                )
+
     def __neg__(self):
         if self._is_failed_portfolio:
             return self.copy()
-        args = {arg: getattr(self, arg) for arg in args_names(self.__init__)}
+        args = self._get_init_params()
         args["weights"] = -self.weights
         return self.__class__(**args)
 
     def __abs__(self):
         if self._is_failed_portfolio:
             return self.copy()
-        args = {arg: getattr(self, arg) for arg in args_names(self.__init__)}
+        args = self._get_init_params()
         args["weights"] = np.abs(self.weights)
         return self.__class__(**args)
 
     def __round__(self, n: int):
         if self._is_failed_portfolio:
             return self.copy()
-        args = {arg: getattr(self, arg) for arg in args_names(self.__init__)}
+        args = self._get_init_params()
         args["weights"] = np.round(self.weights, n)
         return self.__class__(**args)
 
@@ -707,15 +759,8 @@ class Portfolio(BasePortfolio):
             return self.copy()
         if other._is_failed_portfolio:
             return other.copy()
-        args = args_names(self.__init__)
-        for arg in args:
-            if arg not in [
-                "weights",
-                "name",
-                "tag",
-            ] and not np.array_equal(getattr(self, arg), getattr(other, arg)):
-                raise ValueError(f"Cannot add two Portfolios with different `{arg}`")
-        args = {arg: getattr(self, arg) for arg in args}
+        self._check_compatible_parameters(other=other)
+        args = self._get_init_params()
         args["weights"] = self.weights + other.weights
         return self.__class__(**args)
 
@@ -728,17 +773,8 @@ class Portfolio(BasePortfolio):
             return self.copy()
         if other._is_failed_portfolio:
             return other.copy()
-        args = args_names(self.__init__)
-        for arg in args:
-            if arg not in [
-                "weights",
-                "name",
-                "tag",
-            ] and not np.array_equal(getattr(self, arg), getattr(other, arg)):
-                raise ValueError(
-                    f"Cannot subtract two Portfolios with different `{arg}`"
-                )
-        args = {arg: getattr(self, arg) for arg in args}
+        self._check_compatible_parameters(other=other)
+        args = self._get_init_params()
         args["weights"] = self.weights - other.weights
         return self.__class__(**args)
 
@@ -750,7 +786,7 @@ class Portfolio(BasePortfolio):
             )
         if self._is_failed_portfolio:
             return self.copy()
-        args = {arg: getattr(self, arg) for arg in args_names(self.__init__)}
+        args = self._get_init_params()
         args["weights"] = other * self.weights
         return self.__class__(**args)
 
@@ -764,7 +800,7 @@ class Portfolio(BasePortfolio):
             )
         if self._is_failed_portfolio:
             return self.copy()
-        args = {arg: getattr(self, arg) for arg in args_names(self.__init__)}
+        args = self._get_init_params()
         args["weights"] = np.floor_divide(self.weights, other)
         return self.__class__(**args)
 
@@ -776,7 +812,7 @@ class Portfolio(BasePortfolio):
             )
         if self._is_failed_portfolio:
             return self.copy()
-        args = {arg: getattr(self, arg) for arg in args_names(self.__init__)}
+        args = self._get_init_params()
         args["weights"] = self.weights / other
         return self.__class__(**args)
 
@@ -831,17 +867,21 @@ class Portfolio(BasePortfolio):
 
     @property
     def turnover(self) -> float:
-        """L1 norm of `weights - previous_weights`.
+        """Total absolute weight traded at the start of the period.
 
         In a sequential evaluation, `previous_weights` come from the last successful
         Portfolio. With `weight_drift=False`, they are its target weights, so this is
         target turnover. With `weight_drift=True`, they include the intervening drift,
         so this is executed turnover. When `previous_weights` is None, it defaults to
-        zero.
+        zero. Turnover includes the full absolute weight of positions in assets
+        absent from `X`.
         """
         if self._is_failed_portfolio:
             return np.nan
-        return float(np.abs(self.weights - self.previous_weights).sum())
+        return (
+            float(np.abs(self.weights - self.previous_weights).sum())
+            + self._liquidation_turnover
+        )
 
     def _get_weights_path(self) -> FloatArray:
         """Drifted weights held during each observation, for all assets.
@@ -1016,11 +1056,8 @@ class Portfolio(BasePortfolio):
                     spacing = 1e-1
                 else:
                     spacing = 1e-5
-            args = {
-                arg: getattr(self, arg)
-                for arg in args_names(self.__init__)
-                if arg != "weights"
-            }
+            args = self._get_init_params()
+            args.pop("weights")
 
             contribution, assets = _compute_contribution(
                 args=args,

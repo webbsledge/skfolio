@@ -98,7 +98,7 @@ holdings a fund would trade from. A failed period keeps the last successful endi
 weights. The sequential path requires one portfolio per fold and raises for estimators
 that return a :class:`~skfolio.population.Population`. With non-sequential splitters
 such as `KFold`, drift is evaluated inside each test fold and is not propagated. See
-:ref:`evaluation_conventions` for the choice between `weight_drift=False` and
+:ref:`backtesting_and_evaluation` for the choice between `weight_drift=False` and
 `weight_drift=True`.
 
 **Example:**

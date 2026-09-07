@@ -130,7 +130,7 @@ In a sequential evaluation, drift can still change transaction costs at later
 rebalancing dates because one portfolio's `ending_weights` become the next portfolio's
 `previous_weights`. Management fees remain based on the target weights.
 `weight_drift` changes the return series, `compounded` changes how that series is
-summarized. See :ref:`evaluation_conventions` for the choice between
+summarized. See :ref:`backtesting_and_evaluation` for the choice between
 `weight_drift=False` and `weight_drift=True`.
 
 **Example:**

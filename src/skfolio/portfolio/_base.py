@@ -42,6 +42,7 @@ from __future__ import annotations
 import warnings
 from abc import abstractmethod
 from collections.abc import Callable
+from functools import partial
 from typing import ClassVar
 
 import numpy as np
@@ -552,10 +553,13 @@ class BasePortfolio:
 
     def __reduce__(self):
         # For fast serialization and deserialization
-        # We don't want to serialize generic slots but only init arguments
-        return self.__class__, tuple(
-            [getattr(self, arg) for arg in args_names(self.__init__)]
-        )
+        # We don't want to serialize generic slots but only init arguments.
+        # Save them by name so constructor parameter order can change.
+        return partial(type(self), **self._get_init_params()), ()
+
+    def _get_init_params(self) -> dict:
+        """Return the parameters needed to reconstruct this portfolio."""
+        return {arg: getattr(self, arg) for arg in args_names(self.__init__)}
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} {self.name}>"

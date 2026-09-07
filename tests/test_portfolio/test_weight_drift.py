@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import operator
 import pickle
 from copy import copy
 
@@ -246,3 +247,160 @@ def test_multi_period_drift_properties_skip_failed_children(returns):
         "period_1",
     ]
     assert np.isnan(portfolio.ending_weights_dict["failed"]["A"])
+
+
+@pytest.mark.parametrize(
+    "transaction_costs, expected_cost",
+    [
+        (0.0, 0.0),
+        (0.001, 0.002),
+        ({"A": 0.002, "S": 0.003, "B": 0.001}, 0.0032),
+        ({"A": 0.002, "S": 0.003, "B": 0.0}, 0.0022),
+    ],
+)
+def test_liquidations_include_long_and_short_positions(
+    returns, transaction_costs, expected_cost
+):
+    portfolio = Portfolio(
+        X=returns[["B"]],
+        weights=[1.0],
+        previous_weights={"A": 0.8, "S": -0.2},
+        transaction_costs=transaction_costs,
+        weight_drift=True,
+    )
+    for restored in (
+        portfolio,
+        copy(portfolio),
+        pickle.loads(pickle.dumps(portfolio)),
+        portfolio * 1,
+    ):
+        assert restored.turnover == pytest.approx(2.0)
+        assert restored.total_cost == pytest.approx(expected_cost)
+        np.testing.assert_allclose(restored.returns, returns["B"] - expected_cost)
+        np.testing.assert_array_equal(restored.previous_weights, [0.0])
+
+
+def test_liquidation_inputs_survive_parameter_reconstruction(returns):
+    previous = {"A": 1.0}
+    costs = {"A": 0.002, "B": 0.001}
+    portfolio = Portfolio(
+        X=returns[["B"]],
+        weights=[1.0],
+        previous_weights=previous,
+        transaction_costs=costs,
+    )
+    previous["A"] = 9.0
+    costs["A"] = 0.5
+    scaled = portfolio * 0.5
+    assert scaled.turnover == pytest.approx(1.5)
+    assert scaled.total_cost == pytest.approx(0.0025)
+    restored = pickle.loads(pickle.dumps(MultiPeriodPortfolio([portfolio])))
+    assert restored[0].total_cost == pytest.approx(0.003)
+
+
+@pytest.mark.parametrize("operation", [operator.add, operator.sub])
+@pytest.mark.parametrize(
+    "parameter, different_value",
+    [
+        ("previous_weights", {"A": 0.5}),
+        ("transaction_costs", {"A": 0.002, "B": 0.001}),
+    ],
+)
+def test_binary_operations_check_excluded_assets(
+    returns, operation, parameter, different_value
+):
+    params = {
+        "X": returns[["B"]],
+        "weights": [1.0],
+        "previous_weights": {"A": 1.0},
+        "transaction_costs": {"A": 0.001, "B": 0.001},
+    }
+    first = Portfolio(**params)
+    identical = Portfolio(**params)
+    combined = operation(first, identical)
+    expected_turnover = 1.0 + abs(operation(1.0, 1.0))
+    assert combined.turnover == pytest.approx(expected_turnover)
+    assert combined.total_cost == pytest.approx(0.001 * expected_turnover)
+
+    different = Portfolio(**(params | {parameter: different_value}))
+    for left, right in ((first, different), (different, first)):
+        with pytest.raises(ValueError, match=parameter):
+            operation(left, right)
+
+
+@pytest.mark.parametrize("operation", [operator.add, operator.sub])
+def test_binary_operations_accept_equivalent_named_and_array_inputs(returns, operation):
+    named = Portfolio(
+        X=returns,
+        weights=[0.5, 0.3, 0.2],
+        previous_weights={"A": 0.6, "B": 0.4},
+        transaction_costs={"A": 0.001},
+    )
+    array = Portfolio(
+        X=returns,
+        weights=[0.5, 0.3, 0.2],
+        previous_weights=[0.6, 0.4, 0.0],
+        transaction_costs=[0.001, 0.0, 0.0],
+    )
+    combined = operation(named, array)
+    np.testing.assert_array_equal(
+        combined.weights, operation(named.weights, array.weights)
+    )
+    assert combined.total_cost == pytest.approx(0.001 * abs(combined.weights[0] - 0.6))
+
+
+def test_liquidation_requires_identifiable_cost_rates(returns):
+    with pytest.raises(ValueError, match="costs for liquidated assets are unavailable"):
+        Portfolio(
+            X=returns[["B"]],
+            weights=[1.0],
+            previous_weights={"A": 1.0},
+            transaction_costs=[0.001],
+        )
+
+
+def test_pickle_does_not_depend_on_constructor_parameter_order(returns, monkeypatch):
+    portfolio = Portfolio(
+        X=returns,
+        weights=[0.5, 0.3, 0.2],
+        weight_drift=True,
+        compounded=True,
+        sample_weight=np.array([0.2, 0.3, 0.5]),
+        min_acceptable_return=0.001,
+        cvar_beta=0.9,
+    )
+    payload = pickle.dumps(portfolio)
+    original_init = Portfolio.__init__
+
+    def reordered_init(self, weights, X, **kwargs):
+        original_init(self, X=X, weights=weights, **kwargs)
+
+    monkeypatch.setattr(Portfolio, "__init__", reordered_init)
+    restored = pickle.loads(payload)
+    assert restored.weight_drift is True
+    assert restored.compounded is True
+    assert restored.min_acceptable_return == 0.001
+    assert restored.cvar_beta == 0.9
+    np.testing.assert_array_equal(restored.sample_weight, portfolio.sample_weight)
+    np.testing.assert_array_equal(restored.returns, portfolio.returns)
+
+
+def test_turnover_omits_empty_children(returns):
+    first = Portfolio(X=returns.iloc[:2], weights=[0.5, 0.3, 0.2])
+    empty = Portfolio(X=returns.iloc[:0], weights=[0.5, 0.3, 0.2])
+    failed = FailedPortfolio(X=returns.iloc[2:], weight_drift=True)
+    path = MultiPeriodPortfolio([empty, first, empty, failed])
+    pd.testing.assert_series_equal(
+        path.turnover,
+        pd.Series(
+            [1.0, np.nan], index=[returns.index[0], returns.index[2]], name="turnover"
+        ),
+    )
+    assert len(path) == 4
+    empty_turnover = MultiPeriodPortfolio([empty]).turnover
+    assert empty_turnover.empty
+    assert empty_turnover.dtype == float
+    assert empty_turnover.name == "turnover"
+    restored = pickle.loads(pickle.dumps(failed))
+    assert restored.weight_drift is True
+    assert np.isnan(restored.turnover)

@@ -7,6 +7,7 @@ import warnings
 from itertools import pairwise
 
 import numpy as np
+import pandas as pd
 import pytest
 import sklearn.model_selection as sks
 import sklearn.utils as sku
@@ -27,7 +28,12 @@ from skfolio.moments import (
     EWCovariance,
     ImpliedCovariance,
 )
-from skfolio.optimization import InverseVolatility, MeanRisk, ObjectiveFunction
+from skfolio.optimization import (
+    EqualWeighted,
+    InverseVolatility,
+    MeanRisk,
+    ObjectiveFunction,
+)
 from skfolio.optimization._base import BaseOptimization
 from skfolio.pre_selection import SelectKExtremes
 from skfolio.prior import EmpiricalPrior
@@ -830,3 +836,110 @@ def test_sequential_population_prediction_raises_clear_error(X):
             cv=sks.TimeSeriesSplit(n_splits=3),
             portfolio_params={"weight_drift": True},
         )
+
+
+@pytest.mark.parametrize("n_jobs", [1, 2])
+@pytest.mark.parametrize("input_type", ["named", "numeric_columns", "array"])
+@pytest.mark.parametrize(
+    "cv",
+    [
+        WalkForward(train_size=20, test_size=10),
+        sks.TimeSeriesSplit(n_splits=3),
+        MultipleRandomizedCV(
+            walk_forward=WalkForward(train_size=20, test_size=10),
+            n_subsamples=2,
+            asset_subset_size=2,
+            random_state=0,
+        ),
+    ],
+)
+def test_target_turnover_without_costs(cv, n_jobs, input_type):
+    X = pd.DataFrame(
+        np.random.default_rng(0).normal(0, 0.01, (60, 4)), columns=list("ABCD")
+    )
+    if input_type == "array":
+        X = X.to_numpy()
+    elif input_type == "numeric_columns":
+        X.columns = range(4)
+    model = EqualWeighted()
+    with warnings.catch_warnings(record=True) as caught:
+        pred = cross_val_predict(model, X, cv=cv, n_jobs=n_jobs)
+    assert not any("sequential processing" in str(w.message) for w in caught)
+    for path in pred if isinstance(pred, Population) else [pred]:
+        np.testing.assert_allclose(path.turnover, [1.0, *np.zeros(len(path) - 1)])
+        for previous, current in pairwise(path):
+            np.testing.assert_array_equal(current.previous_weights, previous.weights)
+    assert model.previous_weights is None
+    assert model.portfolio_params is None
+
+
+@pytest.mark.parametrize("output", ["global", "pipeline"])
+@pytest.mark.parametrize("weight_drift", [False, True])
+@pytest.mark.parametrize(
+    "costs, expected_cost",
+    [
+        (0.0, 0.0),
+        (0.001, 0.002),
+        ({"A": 0.002, "B": 0.001}, 0.003),
+        ({"A": 0.002, "B": 0.0}, 0.002),
+    ],
+)
+def test_pipeline_asset_replacement_counts_both_trades(
+    output, weight_drift, costs, expected_cost
+):
+    X = pd.DataFrame(
+        [
+            [0.08, 0],
+            [0.11, 0.01],
+            [0.09, -0.01],
+            [0.12, 0],
+            [0, 0.08],
+            [0.01, 0.11],
+            [-0.01, 0.09],
+            [0, 0.12],
+            [0, 0.08],
+            [0.01, 0.11],
+            [-0.01, 0.09],
+            [0, 0.12],
+        ],
+        columns=["A", "B"],
+    )
+    pipe = Pipeline(
+        [
+            ("select", SelectKExtremes(k=1, measure=PerfMeasure.MEAN)),
+            ("optimization", MeanRisk(transaction_costs=costs)),
+        ]
+    )
+    if output == "pipeline":
+        pipe.set_output(transform="pandas")
+    with config_context(transform_output="pandas" if output == "global" else "default"):
+        pred = cross_val_predict(
+            pipe,
+            X,
+            cv=WalkForward(train_size=4, test_size=4),
+            portfolio_params={"weight_drift": weight_drift},
+        )
+    assert pred[0].assets.tolist() == ["A"]
+    assert pred[1].assets.tolist() == ["B"]
+    assert pred[1].turnover == pytest.approx(2.0)
+    assert pred[1].total_cost == pytest.approx(expected_cost)
+    np.testing.assert_allclose(
+        pred[1].returns, X["B"].iloc[8:] - expected_cost, atol=1e-10
+    )
+    assert pipe[-1].previous_weights is None
+
+
+def test_independent_fits_keep_holdings_across_failed_period(X, monkeypatch):
+    monkeypatch.setattr(
+        FailingFixedOptimization, "needs_previous_weights", property(lambda self: False)
+    )
+    model = FailingFixedOptimization(
+        fail_on_n_observations=(10,), raise_on_failure=False
+    )
+    with pytest.warns(UserWarning, match="forced failure"):
+        pred = cross_val_predict(
+            model, X.iloc[:20, :3], cv=sks.TimeSeriesSplit(n_splits=3)
+        )
+    assert isinstance(pred[1], FailedPortfolio)
+    np.testing.assert_allclose(pred.turnover, [1.0, np.nan, 0.0], equal_nan=True)
+    np.testing.assert_array_equal(pred[2].previous_weights, pred[0].ending_weights)

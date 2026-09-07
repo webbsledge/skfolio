@@ -645,11 +645,13 @@ class MultiPeriodPortfolio(BasePortfolio):
         successful Portfolio. With `weight_drift=False`, they are its target weights,
         so each value measures target turnover. With `weight_drift=True`, they include
         the intervening drift, so each value measures executed turnover. Failed
-        portfolios have a NaN value.
+        portfolios have a NaN value. Empty portfolios are omitted because they have
+        no observation to use as a rebalancing date.
         """
+        portfolios = [p for p in self.portfolios if p.n_observations]
         return pd.Series(
-            data=[portfolio.turnover for portfolio in self.portfolios],
-            index=[portfolio.observations[0] for portfolio in self.portfolios],
+            data=[portfolio.turnover for portfolio in portfolios],
+            index=[portfolio.observations[0] for portfolio in portfolios],
             name="turnover",
             dtype=float,
         )

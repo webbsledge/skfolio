@@ -26,9 +26,10 @@ from skfolio.measures import BaseMeasure, RatioMeasure
 from skfolio.metrics._scorer import _BaseScorer, _EstimatorScorer
 from skfolio.model_selection._validation import (
     _apply_entry_rebalancing_params,
-    _asset_names_enabled,
     _get_last_step,
+    _has_asset_names,
     _is_portfolio_optimization_estimator,
+    _propagate_previous_weights,
     _resolve_evaluation_portfolio_params,
     _route_params,
     _sync_measure_params_to_portfolios,
@@ -147,6 +148,7 @@ def online_predict(
         asset returns, and the path runs sequentially: the `ending_weights` of each
         portfolio are passed as `previous_weights` to the next update. A value passed
         here overrides the optimizer's `portfolio_params`.
+        Failed and empty portfolios do not update the previous holdings.
 
         Optimizer parameters such as `transaction_costs`, `management_fees` and
         `previous_weights` are not accepted here. Set them on the optimizer.
@@ -188,10 +190,11 @@ def online_predict(
     Notes
     -----
     When the estimator needs previous weights, each portfolio's `ending_weights` are
-    passed as `previous_weights` to the next update. They equal the target `weights`
-    when `weight_drift=False` and the weights after the last observation when
-    `weight_drift=True`. A `FailedPortfolio` is skipped and the last valid weights are
-    kept.
+    passed as `previous_weights` to the next update. Otherwise, previous weights are
+    assigned to the predicted portfolios afterward for turnover and cost calculations.
+    Ending weights equal the target `weights` when `weight_drift=False` and the
+    weights after the last observation when `weight_drift=True`. Failed and empty
+    portfolios are skipped when propagating holdings, preserving the last valid weights.
 
     Examples
     --------
@@ -363,6 +366,7 @@ def online_score(
         asset returns, and the path runs sequentially: the `ending_weights` of each
         portfolio are passed as `previous_weights` to the next update. A value passed
         here overrides the optimizer's `portfolio_params`.
+        Failed and empty portfolios do not update the previous holdings.
 
         Optimizer parameters such as `transaction_costs`, `management_fees` and
         `previous_weights` are not accepted here. Set them on the optimizer.
@@ -666,7 +670,6 @@ def _online_predict(
     )
     last_step = _get_last_step(estimator)
     needs_prev_weights = getattr(last_step, "needs_previous_weights", False)
-    use_dict = _asset_names_enabled(X)
     previous_params = _apply_entry_rebalancing_params(
         estimator, entry_rebalancing_params
     )
@@ -702,12 +705,16 @@ def _online_predict(
                     previous_params = None
                 first_optimization = False
 
-            if needs_prev_weights and not isinstance(portfolio, FailedPortfolio):
+            if (
+                needs_prev_weights
+                and not isinstance(portfolio, FailedPortfolio)
+                and portfolio.n_observations
+            ):
                 # _online_walk_forward updates the estimator before yielding again.
                 last_step.set_params(
                     previous_weights=(
                         portfolio.ending_weights_dict
-                        if use_dict
+                        if _has_asset_names(X=portfolio.X)
                         else portfolio.ending_weights
                     )
                 )
@@ -715,6 +722,8 @@ def _online_predict(
         if previous_params is not None:
             last_step.set_params(**previous_params)
 
+    if not needs_prev_weights:
+        portfolios = _propagate_previous_weights(portfolios=portfolios)
     mpp = MultiPeriodPortfolio(portfolios=portfolios, **portfolio_params)
     _sync_measure_params_to_portfolios(mpp, explicit_measure_param_names)
     return mpp

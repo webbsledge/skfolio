@@ -25,7 +25,14 @@ import sklearn.base as skb
 from sklearn.utils import Bunch
 
 from skfolio._constants import _PASSTHROUGH
-from skfolio.typing import ArrayLike, BoolArray, FloatArray, IntArray, StrArray
+from skfolio.typing import (
+    ArrayLike,
+    BoolArray,
+    FloatArray,
+    IntArray,
+    MultiInput,
+    StrArray,
+)
 
 __all__ = [
     "AutoEnum",
@@ -620,6 +627,65 @@ def input_to_array(
             f"got {arr.shape[0]}"
         )
     return arr
+
+
+def _get_liquidation_turnover_and_cost(
+    previous_weights: MultiInput | None,
+    transaction_costs: MultiInput | None,
+    assets_names: StrArray | None,
+    investable_mask: BoolArray | None = None,
+) -> tuple[float, float]:
+    """Return turnover and cost assuming full liquidation of excluded positions.
+
+    Positions outside the current asset set or investable subset have a target
+    weight of zero. Named previous holdings retain positions removed by a selector.
+    Array inputs can identify excluded positions when a full-universe investable
+    mask is available. Asset-specific cost arrays must cover those positions too.
+    """
+    if assets_names is None:
+        if investable_mask is None:
+            return 0.0, 0.0
+        # Use column positions as identifiers when asset names are unavailable.
+        assets_names = np.arange(len(investable_mask))
+
+    if not isinstance(previous_weights, dict):
+        if investable_mask is None or previous_weights is None:
+            return 0.0, 0.0
+        if np.isscalar(previous_weights):
+            previous_weights = np.full(len(assets_names), previous_weights)
+        if np.shape(previous_weights) != (len(assets_names),):
+            # Weights supplied only for the investable subset contain no exits.
+            return 0.0, 0.0
+        previous_weights = dict(zip(assets_names, previous_weights, strict=True))
+
+    active_assets = set(
+        assets_names if investable_mask is None else assets_names[investable_mask]
+    )
+    liquidated = {
+        asset: abs(weight)
+        for asset, weight in previous_weights.items()
+        if asset not in active_assets and weight != 0
+    }
+    turnover = float(sum(liquidated.values()))
+    if not liquidated:
+        return turnover, 0.0
+    if np.isnan(turnover):
+        raise ValueError("`previous_weights` contains NaN")
+    if transaction_costs is None:
+        return turnover, 0.0
+    if np.isscalar(transaction_costs):
+        return turnover, float(transaction_costs * turnover)
+    if not isinstance(transaction_costs, dict):
+        if np.shape(transaction_costs) != (len(assets_names),) or not set(
+            liquidated
+        ).issubset(assets_names):
+            raise ValueError(
+                "Transaction costs for liquidated assets are unavailable. "
+                "Use a scalar or an asset-name dictionary covering those assets."
+            )
+        transaction_costs = dict(zip(assets_names, transaction_costs, strict=True))
+    cost = sum(transaction_costs.get(asset, 0.0) * w for asset, w in liquidated.items())
+    return turnover, float(cost)
 
 
 def validate_input_list(
